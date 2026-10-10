@@ -3,6 +3,8 @@
 A terminal game launcher for Windows games on Linux, running them through
 [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) and Proton.
 
+![gameshelf showing Level Devil with its hero banner and cover](docs/screenshot.jpg)
+
 - Every top-level directory in your library (default `~/Games`) is a game.
 - New games are matched against the Steam store automatically (title,
   developer, release date, genres, description). You can also pick a match
