@@ -17,6 +17,8 @@ A terminal game launcher for Windows games on Linux, running them through
 - Library artwork (cover and hero banner from Steam) is shown in terminals
   that implement the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
   including a cover-shelf view.
+- Works with a game controller: navigate, launch and manage games, with
+  on-screen hints that switch to your controller's buttons.
 - Everything is also scriptable: `gameshelf run celeste`.
 
 ## Install
@@ -89,6 +91,31 @@ gameshelf runtime list | remove <name>
 
 Global options: `-L/--library DIR` (or `GAMESHELF_LIBRARY`) and `--offline`
 (skip Steam lookups; new games are looked up on the next online run).
+
+## Controllers
+
+Xbox, PlayStation and Nintendo controllers, and anything that presents
+itself as one of them, are read through [gilrs](https://gitlab.com/gilrs-project/gilrs)
+with SDL's controller database. As soon as a controller is connected or
+used, the key hints switch to its buttons, labelled for its family (A/B/X/Y,
+✕/○/□/△ or Nintendo's B/A/Y/X). Pressing a key switches them back.
+
+| Button (Xbox / PlayStation) | Action |
+| --- | --- |
+| D-pad, left stick | move (repeats while held) |
+| A / ✕ | play · confirm |
+| B / ○ | back · cancel |
+| X / □ | stop the game |
+| Y / △ | switch list / shelf |
+| LB RB / L1 R1 | page · switch pane on the runtimes screen |
+| ≡ (Menu / Options) | menu with everything else: match, executable, prefix, runtime, sort, rescan, runtimes, quit |
+| ⧉ (View / Create) | help |
+
+Buttons work by position, so on Nintendo controllers the bottom button (B)
+confirms. Because controllers are shared with the games, gameshelf ignores
+them while its terminal doesn't have focus (if the terminal reports focus
+changes) or otherwise while a game is running. Reading controllers needs
+access to `/dev/input/event*`, which systemd grants to the logged-in user.
 
 ## Artwork
 

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::gamepad::{Pad, Style as PadStyle};
 use super::graphics::SlotState;
 use super::{App, AvailEntry, InputKind, Level, Load, Modal, Pane, RuntimeScreen, Screen, Sort, View};
 use crate::art::ArtKind;
@@ -53,12 +54,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     draw_status(f, app, status);
     draw_keys(f, app, keys);
+    let pad = pad_hints(app);
     if let Some(modal) = &mut app.modal {
-        app.overlay = Some(draw_modal(f, modal));
+        app.overlay = Some(draw_modal(f, modal, pad));
     }
 }
 
 // -- helpers ----------------------------------------------------------------
+
+/// The controller style to show hints for, when the last input was a controller.
+fn pad_hints(app: &App) -> Option<PadStyle> {
+    app.pad.as_ref().filter(|_| app.pad_input).map(|(_, style)| *style)
+}
+
+/// A controller button as a key badge, in the button's colour.
+fn pad_badge(style: PadStyle, pad: Pad) -> Span<'static> {
+    let (label, color) = style.label(pad);
+    let fg = color.unwrap_or(theme::SELECTED_FG);
+    Span::styled(format!(" {label} "), Style::new().bg(theme::SELECTED_BG).fg(fg).bold())
+}
+
+fn key_badge(key: &str) -> Span<'static> {
+    Span::styled(format!(" {key} "), Style::new().bg(theme::SELECTED_BG).fg(theme::SELECTED_FG))
+}
 
 /// Cut `s` to `width` display columns, ending in `…` if shortened.
 fn truncate(s: &str, width: usize) -> String {
@@ -162,6 +180,10 @@ fn draw_topbar(f: &mut Frame, app: &App, area: Rect) {
     }
     if app.offline {
         right.push(Span::styled("offline   ", Style::new().fg(theme::MUTED)));
+    }
+    if let Some((name, _)) = &app.pad {
+        let color = if app.pad_input { theme::ACCENT } else { theme::MUTED };
+        right.push(Span::styled(format!("🎮 {}   ", truncate(name, 28)), Style::new().fg(color)));
     }
     right.push(Span::styled(format!("{} games ", app.lock.games.len()), Style::new().fg(theme::MUTED)));
     f.render_widget(Paragraph::new(Line::from(left)), area);
@@ -344,7 +366,13 @@ fn info_lines(app: &App, dir: &str, g: &Game, accent: Color, width: u16) -> Vec<
         action.push(Span::styled(" ● STARTING ", Style::new().bg(theme::GREEN).fg(theme::ON_ACCENT).bold()));
     } else {
         action.push(Span::styled(" ▶ PLAY ", Style::new().bg(accent).fg(theme::ON_ACCENT).bold()));
-        action.push(Span::styled("  Enter", Style::new().fg(theme::MUTED)));
+        match pad_hints(app) {
+            Some(style) => {
+                action.push(Span::raw("  "));
+                action.push(pad_badge(style, Pad::South));
+            }
+            None => action.push(Span::styled("  Enter", Style::new().fg(theme::MUTED))),
+        }
     }
     match g.last_played {
         Some(t) => action.push(Span::styled(
@@ -739,6 +767,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(style) = pad_hints(app) {
+        draw_pad_keys(f, app, style, area);
+        return;
+    }
     let keys: &[(&str, &str)] = match (&app.modal, app.screen) {
         (Some(Modal::Input { .. }), _) => &[("Enter", "ok"), ("Esc", "cancel")],
         (Some(Modal::Select { .. }), _) => &[("↑↓", "move"), ("Enter", "choose"), ("Esc", "cancel")],
@@ -769,8 +801,47 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut spans = vec![Span::raw(" ")];
     for (k, v) in keys {
-        spans
-            .push(Span::styled(format!(" {k} "), Style::new().bg(theme::SELECTED_BG).fg(theme::SELECTED_FG)));
+        spans.push(key_badge(k));
+        spans.push(Span::styled(format!(" {v}  "), Style::new().fg(theme::MUTED)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Hints for controller input: the same actions, labelled with the buttons
+/// of the connected controller's family.
+fn draw_pad_keys(f: &mut Frame, app: &App, style: PadStyle, area: Rect) {
+    use Pad::*;
+    let keys: &[(&[Pad], &str)] = match (&app.modal, app.screen) {
+        (Some(Modal::Input { .. }), _) => &[(&[South], "ok"), (&[East], "cancel")],
+        (Some(Modal::Select { .. }), _) => &[(&[Up], "move"), (&[South], "choose"), (&[East], "cancel")],
+        (Some(Modal::Confirm { .. }), _) => &[(&[South], "yes"), (&[East], "no")],
+        (Some(Modal::Help), _) => &[(&[South], "close")],
+        (None, Screen::Games) => &[
+            (&[Up], "move"),
+            (&[South], "play"),
+            (&[West], "stop"),
+            (&[North], "view"),
+            (&[Lb, Rb], "page"),
+            (&[Start], "menu"),
+            (&[Select], "help"),
+        ],
+        (None, Screen::Runtimes) => &[
+            (&[Up], "move · source"),
+            (&[South], "install/default"),
+            (&[West], "delete"),
+            (&[North], "refresh"),
+            (&[Lb, Rb], "pane"),
+            (&[East], "back"),
+        ],
+    };
+    let mut spans = vec![Span::raw(" ")];
+    for (pads, v) in keys {
+        for (i, pad) in pads.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(pad_badge(style, *pad));
+        }
         spans.push(Span::styled(format!(" {v}  "), Style::new().fg(theme::MUTED)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -792,7 +863,7 @@ fn modal_block(title: &str) -> Block<'static> {
 }
 
 /// Draws the popup and returns the area it covers.
-fn draw_modal(f: &mut Frame, modal: &mut Modal) -> Rect {
+fn draw_modal(f: &mut Frame, modal: &mut Modal, pad: Option<PadStyle>) -> Rect {
     let area = f.area();
     match modal {
         Modal::Input { kind, title, hint, input } => {
@@ -842,12 +913,20 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal) -> Rect {
             f.render_widget(Clear, rect);
             let mut lines: Vec<Line> = message.lines().map(|l| Line::from(l.to_string())).collect();
             lines.push(Line::default());
-            lines.push(Line::from(vec![
-                Span::styled(" y ", Style::new().bg(theme::ACCENT).fg(theme::ON_ACCENT).bold()),
-                Span::raw(" yes   "),
-                Span::styled(" n ", Style::new().bg(theme::SELECTED_BG).fg(theme::SELECTED_FG)),
-                Span::raw(" no"),
-            ]));
+            lines.push(Line::from(match pad {
+                Some(style) => vec![
+                    pad_badge(style, Pad::South),
+                    Span::raw(" yes   "),
+                    pad_badge(style, Pad::East),
+                    Span::raw(" no"),
+                ],
+                None => vec![
+                    Span::styled(" y ", Style::new().bg(theme::ACCENT).fg(theme::ON_ACCENT).bold()),
+                    Span::raw(" yes   "),
+                    key_badge("n"),
+                    Span::raw(" no"),
+                ],
+            }));
             f.render_widget(
                 Paragraph::new(lines).wrap(Wrap { trim: false }).block(modal_block("Confirm")),
                 rect,
@@ -882,7 +961,7 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal) -> Rect {
                 ("", ""),
                 ("q / Ctrl-C", "quit"),
             ];
-            let lines: Vec<Line> = rows
+            let mut lines: Vec<Line> = rows
                 .iter()
                 .map(|(k, v)| {
                     if v.is_empty() {
@@ -895,6 +974,41 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal) -> Rect {
                     }
                 })
                 .collect();
+            // With a controller in use, its buttons come first so they're
+            // visible even when the help doesn't fit.
+            if let Some(style) = pad {
+                let mut pad_lines = Vec::new();
+                pad_lines.push(Line::from(Span::styled(
+                    format!("CONTROLLER ({} layout)", style.name()),
+                    Style::new().fg(theme::SUBTLE).bold(),
+                )));
+                let pad_rows: &[(&[Pad], &str)] = &[
+                    (&[Pad::Up], "move (D-pad or left stick)"),
+                    (&[Pad::South], "play · confirm"),
+                    (&[Pad::East], "back · cancel"),
+                    (&[Pad::West], "stop the game"),
+                    (&[Pad::North], "switch list / shelf"),
+                    (&[Pad::Lb, Pad::Rb], "page (pane on the runtimes screen)"),
+                    (&[Pad::Start], "menu: settings, matching, runtimes, quit…"),
+                    (&[Pad::Select], "this help"),
+                ];
+                for (pads, what) in pad_rows {
+                    let mut spans = vec![Span::raw("  ")];
+                    let mut width = 2;
+                    for p in *pads {
+                        let badge = pad_badge(style, *p);
+                        width += badge.width() + 1;
+                        spans.push(badge);
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::raw(" ".repeat(16usize.saturating_sub(width))));
+                    spans.push(Span::raw(what.to_string()));
+                    pad_lines.push(Line::from(spans));
+                }
+                pad_lines.push(Line::default());
+                pad_lines.append(&mut lines);
+                lines = pad_lines;
+            }
             let rect = centered(area, 84, lines.len() as u16 + 2);
             f.render_widget(Clear, rect);
             f.render_widget(Paragraph::new(lines).block(modal_block("Help")), rect);

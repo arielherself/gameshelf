@@ -1,5 +1,6 @@
 //! The interactive TUI.
 
+mod gamepad;
 mod graphics;
 mod input;
 mod kitty;
@@ -30,9 +31,15 @@ pub fn run(lib: Library, offline: bool) -> Result<()> {
     // Detection talks to the terminal, so it needs raw mode and must happen
     // before the event reader starts consuming input.
     let gfx = graphics::Graphics::init(offline);
-    let mut app = App::new(lib, lock, offline, gfx);
+    // Focus reports let gamepad input be ignored while another window (the
+    // game) has focus.
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), ratatui::crossterm::event::EnableFocusChange);
+    let (pad_tx, pad_rx) = channel();
+    gamepad::spawn(pad_tx);
+    let mut app = App::new(lib, lock, offline, gfx, pad_rx);
     let result = app.event_loop(&mut terminal);
     let _ = app.gfx.shutdown(&mut std::io::stdout());
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), ratatui::crossterm::event::DisableFocusChange);
     ratatui::restore();
     if let Some(d) = &app.runtimes.download {
         d.cancel.store(true, Ordering::Relaxed);
@@ -99,6 +106,8 @@ pub enum InputKind {
 
 #[derive(Clone)]
 pub enum SelectKind {
+    /// The gamepad menu; values are the equivalent keyboard keys.
+    Action,
     Exe(String),
     Prefix(String),
     Runtime(String),
@@ -199,6 +208,14 @@ pub struct App {
     pub grid_scroll: usize,
     /// Area covered by an open popup in the last frame.
     pub overlay: Option<ratatui::layout::Rect>,
+    /// Connected controller and its label style.
+    pub pad: Option<(String, gamepad::Style)>,
+    /// Whether the last input came from a controller (switches the hints).
+    pub pad_input: bool,
+    pad_rx: Receiver<gamepad::PadEvent>,
+    focused: bool,
+    /// Set once the terminal has sent a focus report, i.e. supports them.
+    focus_known: bool,
     pub tick: u64,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -206,7 +223,13 @@ pub struct App {
 }
 
 impl App {
-    fn new(lib: Library, lock: LockFile, offline: bool, gfx: graphics::Graphics) -> Self {
+    fn new(
+        lib: Library,
+        lock: LockFile,
+        offline: bool,
+        gfx: graphics::Graphics,
+        pad_rx: Receiver<gamepad::PadEvent>,
+    ) -> Self {
         let (tx, rx) = channel();
         let mut app = Self {
             runtimes: RuntimeScreen {
@@ -236,6 +259,11 @@ impl App {
             grid_cols: 1,
             grid_scroll: 0,
             overlay: None,
+            pad: None,
+            pad_input: false,
+            pad_rx,
+            focused: true,
+            focus_known: false,
             tick: 0,
             tx,
             rx,
@@ -252,10 +280,23 @@ impl App {
             terminal.draw(|f| ui::draw(f, self))?;
             // Images go on top of the text ratatui just flushed.
             self.gfx.sync(&mut std::io::stdout(), self.overlay)?;
-            let wait = if self.gfx.busy() { 40 } else { 120 };
+            // Controllers are read on another thread; poll often enough
+            // that navigating with one feels immediate.
+            let wait = if self.pad.is_some() {
+                25
+            } else if self.gfx.busy() {
+                40
+            } else {
+                120
+            };
             if event::poll(Duration::from_millis(wait))? {
                 match event::read()? {
-                    Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        self.pad_input = false;
+                        self.on_key(key)
+                    }
+                    Event::FocusGained => (self.focused, self.focus_known) = (true, true),
+                    Event::FocusLost => (self.focused, self.focus_known) = (false, true),
                     // ratatui clears the screen on resize, taking placements with it.
                     Event::Resize(..) => self.gfx.invalidate(&mut std::io::stdout())?,
                     _ => {}
@@ -263,6 +304,9 @@ impl App {
             }
             while let Ok(msg) = self.rx.try_recv() {
                 self.on_msg(msg);
+            }
+            while let Ok(ev) = self.pad_rx.try_recv() {
+                self.on_pad(ev);
             }
             self.tick = self.tick.wrapping_add(1);
             if self.tick.is_multiple_of(8) {
@@ -538,6 +582,102 @@ impl App {
     }
 
     // -- keys ---------------------------------------------------------------
+
+    // -- gamepad ------------------------------------------------------------
+
+    fn on_pad(&mut self, ev: gamepad::PadEvent) {
+        match ev {
+            gamepad::PadEvent::Connected { name, style } => {
+                self.set_status(format!("Controller connected: {name}"), Level::Info);
+                self.pad = Some((name, style));
+                self.pad_input = true;
+            }
+            gamepad::PadEvent::Disconnected => {
+                self.set_status("Controller disconnected", Level::Info);
+                self.pad = None;
+                self.pad_input = false;
+            }
+            gamepad::PadEvent::Press(p) => {
+                if self.accepts_pad() {
+                    self.pad_input = true;
+                    self.on_pad_press(p);
+                }
+            }
+        }
+    }
+
+    /// Controllers are shared with the games: presses meant for a game must
+    /// not drive the launcher. With focus reports, only listen while the
+    /// terminal has focus; without them, not while a game is running.
+    fn accepts_pad(&self) -> bool {
+        let idle = if self.focus_known { self.focused } else { self.running.is_empty() };
+        idle && self.launching.is_empty()
+    }
+
+    fn on_pad_press(&mut self, p: gamepad::Pad) {
+        use gamepad::Pad;
+        let key = |code| Some(KeyEvent::new(code, KeyModifiers::NONE));
+        let k = match (&self.modal, self.screen, p) {
+            (Some(Modal::Help), _, _) => key(KeyCode::Esc),
+            (_, _, Pad::Up) => key(KeyCode::Up),
+            (_, _, Pad::Down) => key(KeyCode::Down),
+            (_, _, Pad::Left) => key(KeyCode::Left),
+            (_, _, Pad::Right) => key(KeyCode::Right),
+            (_, _, Pad::South) => key(KeyCode::Enter),
+            (_, _, Pad::East) => key(KeyCode::Esc),
+            (Some(Modal::Select { .. }), _, Pad::Lb) => key(KeyCode::PageUp),
+            (Some(Modal::Select { .. }), _, Pad::Rb) => key(KeyCode::PageDown),
+            (Some(_), _, _) => None,
+            (None, _, Pad::Select) => key(KeyCode::Char('?')),
+            (None, Screen::Games, Pad::West) => key(KeyCode::Char('x')),
+            (None, Screen::Games, Pad::North) => key(KeyCode::Char('v')),
+            (None, Screen::Games, Pad::Lb) => key(KeyCode::PageUp),
+            (None, Screen::Games, Pad::Rb) => key(KeyCode::PageDown),
+            (None, Screen::Games, Pad::Start) => {
+                self.open_action_menu();
+                None
+            }
+            (None, Screen::Runtimes, Pad::West) => key(KeyCode::Char('d')),
+            (None, Screen::Runtimes, Pad::North) => key(KeyCode::Char('u')),
+            (None, Screen::Runtimes, Pad::Lb | Pad::Rb) => key(KeyCode::Tab),
+            (None, Screen::Runtimes, Pad::Start) => None,
+        };
+        if let Some(k) = k {
+            self.on_key(k);
+        }
+    }
+
+    /// Everything the keyboard can do that a controller can't reach directly.
+    fn open_action_menu(&mut self) {
+        let item = |label: &str, key: &str| SelectItem {
+            label: label.to_string(),
+            detail: format!("key {key}"),
+            value: key.to_string(),
+            current: false,
+        };
+        let mut items = Vec::new();
+        if let Some(dir) = self.selected().map(str::to_string) {
+            let name = self.game_name(&dir);
+            if self.running.contains_key(&dir) {
+                items.push(item(&format!("Stop {name}"), "x"));
+            } else {
+                items.push(item(&format!("Play {name}"), "Enter"));
+            }
+            items.push(item("Search Steam for a match…", "m"));
+            items.push(item("Executable…", "e"));
+            items.push(item("Wine prefix…", "p"));
+            items.push(item("Proton runtime…", "r"));
+        }
+        let view = if self.view == View::List { "Show the cover shelf" } else { "Show the library list" };
+        items.push(item(view, "v"));
+        let sort = if self.sort == Sort::Name { "Sort by recently played" } else { "Sort by name" };
+        items.push(item(sort, "o"));
+        items.push(item("Rescan the library", "s"));
+        items.push(item("Manage Proton runtimes", "R"));
+        items.push(item("Help", "?"));
+        items.push(item("Quit gameshelf", "q"));
+        self.open_select(SelectKind::Action, "Menu".into(), items);
+    }
 
     fn on_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -904,6 +1044,16 @@ impl App {
 
     fn submit_select(&mut self, kind: SelectKind, value: String) {
         match kind {
+            SelectKind::Action => {
+                let code = match value.as_str() {
+                    "Enter" => KeyCode::Enter,
+                    v => match v.chars().next() {
+                        Some(c) => KeyCode::Char(c),
+                        None => return,
+                    },
+                };
+                self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
             SelectKind::Exe(dir) if value.is_empty() => {
                 let current =
                     self.lock.games.get(&dir).and_then(|g| g.executable.clone()).unwrap_or_default();
