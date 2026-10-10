@@ -2,8 +2,7 @@
   lib,
   rustPlatform,
   makeWrapper,
-  pkg-config,
-  udev,
+  sdl3,
   # umu-launcher from the official flake (see flake.nix). Set to null to use
   # whatever `umu-run` is on PATH at runtime instead.
   umu-launcher ? null,
@@ -27,10 +26,10 @@ rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ../Cargo.lock;
 
-  nativeBuildInputs = [ pkg-config ] ++ lib.optionals (umu-launcher != null) [ makeWrapper ];
+  nativeBuildInputs = lib.optionals (umu-launcher != null) [ makeWrapper ];
 
-  # Gamepad support (gilrs) reads controllers through libudev.
-  buildInputs = [ udev ];
+  # Controllers are read through SDL.
+  buildInputs = [ sdl3 ];
 
   # Appended, not prepended: a umu-run installed by the host distro wins.
   # Nix's umu-launcher runs games in an FHS sandbox that only finds GPU

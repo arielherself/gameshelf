@@ -94,11 +94,13 @@ Global options: `-L/--library DIR` (or `GAMESHELF_LIBRARY`) and `--offline`
 
 ## Controllers
 
-Xbox, PlayStation and Nintendo controllers, and anything that presents
-itself as one of them, are read through [gilrs](https://gitlab.com/gilrs-project/gilrs)
-with SDL's controller database. As soon as a controller is connected or
-used, the key hints switch to its buttons, labelled for its family (A/B/X/Y,
-✕/○/□/△ or Nintendo's B/A/Y/X). Pressing a key switches them back.
+Controllers are handled by [SDL 3](https://libsdl.org/), as in most games:
+SDL maps every controller it knows onto the same button positions, tells
+which kind of controller it is, and what's printed on each button. As soon as
+a controller is connected or used, the key hints switch to its buttons (A/B/X/Y,
+✕/○/□/△, or Nintendo's B/A/Y/X), following whichever controller was used
+last. Pressing a key switches them back. Custom mappings in
+`SDL_GAMECONTROLLERCONFIG` (e.g. from Steam) are honoured.
 
 | Button (Xbox / PlayStation) | Action |
 | --- | --- |
@@ -115,7 +117,8 @@ Buttons work by position, so on Nintendo controllers the bottom button (B)
 confirms. Because controllers are shared with the games, gameshelf ignores
 them while its terminal doesn't have focus (if the terminal reports focus
 changes) or otherwise while a game is running. Reading controllers needs
-access to `/dev/input/event*`, which systemd grants to the logged-in user.
+access to `/dev/input/event*` (and `/dev/hidraw*` for SDL's direct drivers),
+which systemd grants to the logged-in user.
 
 ## Artwork
 

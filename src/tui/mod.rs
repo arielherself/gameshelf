@@ -208,8 +208,10 @@ pub struct App {
     pub grid_scroll: usize,
     /// Area covered by an open popup in the last frame.
     pub overlay: Option<ratatui::layout::Rect>,
-    /// Connected controller and its label style.
-    pub pad: Option<(String, gamepad::Style)>,
+    /// Connected controllers: SDL instance id → name and button labels.
+    pub pads: HashMap<u32, (String, gamepad::Layout)>,
+    /// The controller used last; hints follow it.
+    pub active_pad: Option<u32>,
     /// Whether the last input came from a controller (switches the hints).
     pub pad_input: bool,
     pad_rx: Receiver<gamepad::PadEvent>,
@@ -259,7 +261,8 @@ impl App {
             grid_cols: 1,
             grid_scroll: 0,
             overlay: None,
-            pad: None,
+            pads: HashMap::new(),
+            active_pad: None,
             pad_input: false,
             pad_rx,
             focused: true,
@@ -282,7 +285,7 @@ impl App {
             self.gfx.sync(&mut std::io::stdout(), self.overlay)?;
             // Controllers are read on another thread; poll often enough
             // that navigating with one feels immediate.
-            let wait = if self.pad.is_some() {
+            let wait = if !self.pads.is_empty() {
                 25
             } else if self.gfx.busy() {
                 40
@@ -585,22 +588,35 @@ impl App {
 
     // -- gamepad ------------------------------------------------------------
 
+    /// The controller hints are shown for.
+    pub fn pad(&self) -> Option<&(String, gamepad::Layout)> {
+        self.active_pad.and_then(|id| self.pads.get(&id))
+    }
+
     fn on_pad(&mut self, ev: gamepad::PadEvent) {
         match ev {
-            gamepad::PadEvent::Connected { name, style } => {
-                self.set_status(format!("Controller connected: {name}"), Level::Info);
-                self.pad = Some((name, style));
+            gamepad::PadEvent::Connected { id, name, layout } => {
+                self.set_status(format!("Controller connected: {name} ({})", layout.kind), Level::Info);
+                self.pads.insert(id, (name, layout));
+                self.active_pad = Some(id);
                 self.pad_input = true;
             }
-            gamepad::PadEvent::Disconnected => {
-                self.set_status("Controller disconnected", Level::Info);
-                self.pad = None;
-                self.pad_input = false;
+            gamepad::PadEvent::Disconnected { id } => {
+                if let Some((name, _)) = self.pads.remove(&id) {
+                    self.set_status(format!("Controller disconnected: {name}"), Level::Info);
+                }
+                if self.active_pad == Some(id) {
+                    self.active_pad = self.pads.keys().min().copied();
+                }
+                if self.active_pad.is_none() {
+                    self.pad_input = false;
+                }
             }
-            gamepad::PadEvent::Press(p) => {
+            gamepad::PadEvent::Press { id, pad } => {
                 if self.accepts_pad() {
+                    self.active_pad = Some(id);
                     self.pad_input = true;
-                    self.on_pad_press(p);
+                    self.on_pad_press(pad);
                 }
             }
         }

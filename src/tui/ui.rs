@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::gamepad::{Pad, Style as PadStyle};
+use super::gamepad::{Layout as PadLayout, Pad};
 use super::graphics::SlotState;
 use super::{App, AvailEntry, InputKind, Level, Load, Modal, Pane, RuntimeScreen, Screen, Sort, View};
 use crate::art::ArtKind;
@@ -62,14 +62,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // -- helpers ----------------------------------------------------------------
 
-/// The controller style to show hints for, when the last input was a controller.
-fn pad_hints(app: &App) -> Option<PadStyle> {
-    app.pad.as_ref().filter(|_| app.pad_input).map(|(_, style)| *style)
+/// The controller to show hints for, when the last input came from one.
+fn pad_hints(app: &App) -> Option<PadLayout> {
+    app.pad().filter(|_| app.pad_input).map(|(_, layout)| *layout)
 }
 
 /// A controller button as a key badge, in the button's colour.
-fn pad_badge(style: PadStyle, pad: Pad) -> Span<'static> {
-    let (label, color) = style.label(pad);
+fn pad_badge(layout: PadLayout, pad: Pad) -> Span<'static> {
+    let (label, color) = layout.label(pad);
     let fg = color.unwrap_or(theme::SELECTED_FG);
     Span::styled(format!(" {label} "), Style::new().bg(theme::SELECTED_BG).fg(fg).bold())
 }
@@ -181,7 +181,7 @@ fn draw_topbar(f: &mut Frame, app: &App, area: Rect) {
     if app.offline {
         right.push(Span::styled("offline   ", Style::new().fg(theme::MUTED)));
     }
-    if let Some((name, _)) = &app.pad {
+    if let Some((name, _)) = app.pad() {
         let color = if app.pad_input { theme::ACCENT } else { theme::MUTED };
         right.push(Span::styled(format!("🎮 {}   ", truncate(name, 28)), Style::new().fg(color)));
     }
@@ -809,7 +809,7 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
 
 /// Hints for controller input: the same actions, labelled with the buttons
 /// of the connected controller's family.
-fn draw_pad_keys(f: &mut Frame, app: &App, style: PadStyle, area: Rect) {
+fn draw_pad_keys(f: &mut Frame, app: &App, style: PadLayout, area: Rect) {
     use Pad::*;
     let keys: &[(&[Pad], &str)] = match (&app.modal, app.screen) {
         (Some(Modal::Input { .. }), _) => &[(&[South], "ok"), (&[East], "cancel")],
@@ -863,7 +863,7 @@ fn modal_block(title: &str) -> Block<'static> {
 }
 
 /// Draws the popup and returns the area it covers.
-fn draw_modal(f: &mut Frame, modal: &mut Modal, pad: Option<PadStyle>) -> Rect {
+fn draw_modal(f: &mut Frame, modal: &mut Modal, pad: Option<PadLayout>) -> Rect {
     let area = f.area();
     match modal {
         Modal::Input { kind, title, hint, input } => {
@@ -979,7 +979,7 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal, pad: Option<PadStyle>) -> Rect {
             if let Some(style) = pad {
                 let mut pad_lines = Vec::new();
                 pad_lines.push(Line::from(Span::styled(
-                    format!("CONTROLLER ({} layout)", style.name()),
+                    format!("CONTROLLER ({})", style.kind),
                     Style::new().fg(theme::SUBTLE).bold(),
                 )));
                 let pad_rows: &[(&[Pad], &str)] = &[

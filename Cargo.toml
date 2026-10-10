@@ -13,12 +13,12 @@ base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dirs = "7.0.0"
 flate2 = "1.1.10"
-gilrs = "0.11.2"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2.190"
 liblzma = { version = "0.4.8", default-features = false, features = ["static"] }
 ratatui = "0.30.2"
+sdl3 = "0.20.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
