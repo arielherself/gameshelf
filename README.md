@@ -151,3 +151,7 @@ nix develop          # cargo, clippy, rustfmt, rust-analyzer, umu-run
 cargo test           # unit tests + end-to-end tests against a mock Steam/GitHub
 nix build            # the package (also runs the tests)
 ```
+
+## License
+
+[MIT](LICENSE)

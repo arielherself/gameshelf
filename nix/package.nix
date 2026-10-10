@@ -35,6 +35,7 @@ rustPlatform.buildRustPackage {
   meta = {
     description = cargoToml.package.description;
     homepage = "https://github.com/arielherself/gameshelf";
+    license = lib.licenses.mit;
     mainProgram = "gameshelf";
     platforms = lib.platforms.linux;
   };

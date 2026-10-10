@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A TUI game launcher for Windows games via umu-launcher and Proton"
 rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/arielherself/gameshelf"
 
 [dependencies]
 anyhow = "1.0.104"
