@@ -1,6 +1,8 @@
 //! The interactive TUI.
 
+mod graphics;
 mod input;
+mod kitty;
 mod ui;
 
 use std::collections::HashMap;
@@ -23,9 +25,14 @@ use crate::{launch, names};
 use input::TextInput;
 
 pub fn run(lib: Library, offline: bool) -> Result<()> {
-    let mut app = App::new(lib, offline)?;
+    let lock = lib.load()?;
     let mut terminal = ratatui::init();
+    // Detection talks to the terminal, so it needs raw mode and must happen
+    // before the event reader starts consuming input.
+    let gfx = graphics::Graphics::init(offline);
+    let mut app = App::new(lib, lock, offline, gfx);
     let result = app.event_loop(&mut terminal);
+    let _ = app.gfx.shutdown(&mut std::io::stdout());
     ratatui::restore();
     if let Some(d) = &app.runtimes.download {
         d.cancel.store(true, Ordering::Relaxed);
@@ -57,6 +64,14 @@ pub enum Level {
 pub enum Sort {
     Name,
     Recent,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// Sidebar list plus a detail pane.
+    List,
+    /// Grid of covers.
+    Shelf,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -177,6 +192,13 @@ pub struct App {
     pub launching: HashMap<String, Instant>,
     pub lookup_running: bool,
     pub runtimes: RuntimeScreen,
+    pub gfx: graphics::Graphics,
+    pub view: View,
+    /// Shelf layout from the last frame, for 2D navigation.
+    pub grid_cols: usize,
+    pub grid_scroll: usize,
+    /// Area covered by an open popup in the last frame.
+    pub overlay: Option<ratatui::layout::Rect>,
     pub tick: u64,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -184,8 +206,7 @@ pub struct App {
 }
 
 impl App {
-    fn new(lib: Library, offline: bool) -> Result<Self> {
-        let lock = lib.load()?;
+    fn new(lib: Library, lock: LockFile, offline: bool, gfx: graphics::Graphics) -> Self {
         let (tx, rx) = channel();
         let mut app = Self {
             runtimes: RuntimeScreen {
@@ -210,6 +231,11 @@ impl App {
             running: HashMap::new(),
             launching: HashMap::new(),
             lookup_running: false,
+            gfx,
+            view: View::List,
+            grid_cols: 1,
+            grid_scroll: 0,
+            overlay: None,
             tick: 0,
             tx,
             rx,
@@ -218,15 +244,20 @@ impl App {
         app.refresh_rows(None);
         app.refresh_sessions();
         app.start_lookups();
-        Ok(app)
+        app
     }
 
     fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         while !self.quit {
             terminal.draw(|f| ui::draw(f, self))?;
-            if event::poll(Duration::from_millis(120))? {
+            // Images go on top of the text ratatui just flushed.
+            self.gfx.sync(&mut std::io::stdout(), self.overlay)?;
+            let wait = if self.gfx.busy() { 40 } else { 120 };
+            if event::poll(Duration::from_millis(wait))? {
                 match event::read()? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+                    // ratatui clears the screen on resize, taking placements with it.
+                    Event::Resize(..) => self.gfx.invalidate(&mut std::io::stdout())?,
                     _ => {}
                 }
             }
@@ -525,17 +556,37 @@ impl App {
 
     fn on_games_key(&mut self, key: KeyEvent) {
         let len = self.rows.len();
+        // On the shelf, up/down move by a whole row of covers.
+        let (vertical, sideways) = match self.view {
+            View::List => (1, 0),
+            View::Shelf => (self.grid_cols.max(1) as isize, 1),
+        };
         match key.code {
+            KeyCode::Char('v') => {
+                self.view = if self.view == View::List { View::Shelf } else { View::List };
+                if self.view == View::Shelf && !self.gfx.enabled() {
+                    self.set_status(
+                        "This terminal doesn't support the kitty graphics protocol; showing titles instead of covers",
+                        Level::Info,
+                    );
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') if sideways != 0 => {
+                move_sel(&mut self.list_state, len, sideways)
+            }
+            KeyCode::Left | KeyCode::Char('h') if sideways != 0 => {
+                move_sel(&mut self.list_state, len, -sideways)
+            }
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 let keep = self.selected().map(str::to_string);
                 self.refresh_rows(keep.as_deref());
             }
-            KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.list_state, len, 1),
-            KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.list_state, len, -1),
-            KeyCode::PageDown => move_sel(&mut self.list_state, len, 10),
-            KeyCode::PageUp => move_sel(&mut self.list_state, len, -10),
+            KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.list_state, len, vertical),
+            KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.list_state, len, -vertical),
+            KeyCode::PageDown => move_sel(&mut self.list_state, len, 10 * vertical),
+            KeyCode::PageUp => move_sel(&mut self.list_state, len, -10 * vertical),
             KeyCode::Home | KeyCode::Char('g') => self.list_state.select((len > 0).then_some(0)),
             KeyCode::End | KeyCode::Char('G') => self.list_state.select(len.checked_sub(1)),
             KeyCode::Char('?') => self.modal = Some(Modal::Help),

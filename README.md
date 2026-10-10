@@ -12,6 +12,9 @@ A terminal game launcher for Windows games on Linux, running them through
 - Proton builds live in `<library>/.proton-runtimes`. GE-Proton, UMU-Proton
   and Proton-CachyOS can be downloaded (checksum-verified) from inside the
   app, and existing builds from Steam's `compatibilitytools.d` can be linked.
+- Library artwork (cover and hero banner from Steam) is shown in terminals
+  that implement the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
+  including a cover-shelf view.
 - Everything is also scriptable: `gameshelf run celeste`.
 
 ## Install
@@ -49,6 +52,7 @@ works too, with `umu-run` on your `PATH`.
 | Key | Action |
 | --- | --- |
 | `Enter` | launch the selected game · `x` stop it |
+| `v` | switch between the library list and the cover shelf |
 | `/` | filter · `o` toggle sort (name / recently played) |
 | `m` | search Steam and pick the match |
 | `a` | set the Steam app id by hand (empty = none, `auto` = match again) |
@@ -83,6 +87,25 @@ gameshelf runtime list | remove <name>
 
 Global options: `-L/--library DIR` (or `GAMESHELF_LIBRARY`) and `--offline`
 (skip Steam lookups; new games are looked up on the next online run).
+
+## Artwork
+
+At startup gameshelf asks the terminal whether it implements the kitty
+graphics protocol (a graphics query followed by a device-attributes request,
+so terminals without it answer only the latter). Nothing depends on which
+terminal it is. If the protocol is supported, the list view shows the game's
+hero banner and cover, and `v` switches to a shelf of covers. Otherwise the
+same layouts show text only. Set `GAMESHELF_GRAPHICS=kitty` to skip detection
+(e.g. when a multiplexer passes graphics through) or `GAMESHELF_GRAPHICS=none`
+to turn artwork off.
+
+Only the core of the protocol is used: zlib-compressed RGB sent by direct
+transmission, placements sized in cells at the cursor, and deletion by image
+id. Images are scaled to the exact pixel size of their cells, and each game's
+accent colour is taken from its cover.
+
+Artwork URLs come from Steam's `IStoreBrowseService/GetItems`, and the files
+are cached in `~/.cache/gameshelf/art/<appid>/`.
 
 ## How games are launched
 
@@ -127,7 +150,7 @@ umu-run "<exe>" <args>
 | `<library>/.proton-runtimes/` | Proton builds (directories or symlinks) |
 | `<library>/.gameshelf.flock` | advisory lock for concurrent updates |
 | `~/.config/gameshelf/config.toml` | optional: `library = "~/Games"` |
-| `~/.cache/gameshelf/` | GitHub release lists (15 min) |
+| `~/.cache/gameshelf/` | GitHub release lists (15 min), Steam artwork |
 
 Hidden directories in the library are ignored. A game whose directory
 disappears keeps its entry (marked missing) until the directory comes back.
