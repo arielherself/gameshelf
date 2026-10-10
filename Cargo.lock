@@ -691,6 +691,7 @@ dependencies = [
  "dirs",
  "flate2",
  "hex",
+ "libc",
  "liblzma",
  "ratatui",
  "serde",

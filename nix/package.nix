@@ -27,9 +27,13 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = lib.optionals (umu-launcher != null) [ makeWrapper ];
 
+  # Appended, not prepended: a umu-run installed by the host distro wins.
+  # Nix's umu-launcher runs games in an FHS sandbox that only finds GPU
+  # drivers via /run/opengl-driver, i.e. on NixOS; on other distros the
+  # distro package is the one that can actually render.
   postInstall = lib.optionalString (umu-launcher != null) ''
     wrapProgram $out/bin/gameshelf \
-      --prefix PATH : ${lib.makeBinPath [ umu-launcher ]}
+      --suffix PATH : ${lib.makeBinPath [ umu-launcher ]}
   '';
 
   meta = {

@@ -17,6 +17,7 @@ use ratatui::widgets::ListState;
 use crate::library::{self, Library, LookupOutcome};
 use crate::lockfile::{Game, LockFile};
 use crate::runtime::{self, Available, Installed, Progress, Source};
+use crate::session::{self, Session};
 use crate::steam::{SearchItem, SteamClient};
 use crate::{launch, names};
 use input::TextInput;
@@ -28,12 +29,6 @@ pub fn run(lib: Library, offline: bool) -> Result<()> {
     ratatui::restore();
     if let Some(d) = &app.runtimes.download {
         d.cancel.store(true, Ordering::Relaxed);
-    }
-    if !app.running.is_empty() {
-        eprintln!(
-            "Still running: {}. Playtime for these sessions isn't recorded after the TUI exits.",
-            app.running.keys().cloned().collect::<Vec<_>>().join(", ")
-        );
     }
     result
 }
@@ -47,7 +42,7 @@ enum Msg {
     Releases { source: Source, result: Result<Vec<Available>, String> },
     Download(Progress),
     DownloadDone(Result<String, String>),
-    GameExited { dir: String, secs: u64, status: String },
+    Stopped { dir: String, result: Result<(), String> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +92,7 @@ pub enum SelectKind {
 
 pub enum ConfirmKind {
     RemoveRuntime(String),
+    StopGame(String),
 }
 
 pub enum Modal {
@@ -175,7 +171,10 @@ pub struct App {
     pub screen: Screen,
     pub modal: Option<Modal>,
     pub status: Option<(String, Level, Instant)>,
-    pub running: HashMap<String, u32>,
+    /// Running games (from any gameshelf process), refreshed periodically.
+    pub running: HashMap<String, Session>,
+    /// Launched from here but the supervisor hasn't registered yet.
+    pub launching: HashMap<String, Instant>,
     pub lookup_running: bool,
     pub runtimes: RuntimeScreen,
     pub tick: u64,
@@ -209,6 +208,7 @@ impl App {
             modal: None,
             status: None,
             running: HashMap::new(),
+            launching: HashMap::new(),
             lookup_running: false,
             tick: 0,
             tx,
@@ -216,6 +216,7 @@ impl App {
             quit: false,
         };
         app.refresh_rows(None);
+        app.refresh_sessions();
         app.start_lookups();
         Ok(app)
     }
@@ -233,11 +234,58 @@ impl App {
                 self.on_msg(msg);
             }
             self.tick = self.tick.wrapping_add(1);
+            if self.tick.is_multiple_of(8) {
+                self.refresh_sessions();
+            }
         }
         Ok(())
     }
 
     // -- state helpers ------------------------------------------------------
+
+    pub fn is_running(&self, dir: &str) -> bool {
+        self.running.contains_key(dir) || self.launching.contains_key(dir)
+    }
+
+    /// Pick up games started or stopped by any gameshelf process.
+    fn refresh_sessions(&mut self) {
+        let now_running = session::active(&self.lib);
+        let exited: Vec<Session> =
+            self.running.values().filter(|s| !now_running.contains_key(&s.dir)).cloned().collect();
+        let mut failed = Vec::new();
+        self.launching.retain(|dir, at| {
+            if now_running.contains_key(dir) {
+                return false;
+            }
+            // The supervisor registers within milliseconds; if it didn't, it
+            // exited early (the reason is in the log).
+            let pending = at.elapsed() < Duration::from_secs(5);
+            if !pending {
+                failed.push(dir.clone());
+            }
+            pending
+        });
+        self.running = now_running;
+        if !exited.is_empty() {
+            self.reload();
+        }
+        for s in exited {
+            let name = self.game_name(&s.dir);
+            let secs = crate::util::now().saturating_sub(s.started);
+            self.set_status(
+                format!("{name} exited after {}", crate::util::format_duration(secs)),
+                Level::Info,
+            );
+        }
+        for dir in failed {
+            let log = crate::util::tilde(&launch::log_path(&dir));
+            self.set_status(format!("{} failed to start — see {log}", self.game_name(&dir)), Level::Error);
+        }
+    }
+
+    fn game_name(&self, dir: &str) -> String {
+        self.lock.games.get(dir).map(|g| g.display_name(dir).to_string()).unwrap_or_else(|| dir.to_string())
+    }
 
     pub fn selected(&self) -> Option<&str> {
         self.list_state.selected().and_then(|i| self.rows.get(i)).map(String::as_str)
@@ -449,14 +497,11 @@ impl App {
                 }
                 self.refresh_installed();
             }
-            Msg::GameExited { dir, secs, status } => {
-                self.running.remove(&dir);
-                self.reload();
-                let name = self.lock.games.get(&dir).map(|g| g.display_name(&dir).to_string()).unwrap_or(dir);
-                self.set_status(
-                    format!("{name} exited ({status}) after {}", crate::util::format_duration(secs)),
-                    Level::Info,
-                );
+            Msg::Stopped { dir, result } => {
+                if let Err(e) = result {
+                    self.set_status(format!("Stopping {} failed: {e}", self.game_name(&dir)), Level::Error);
+                }
+                self.refresh_sessions();
             }
         }
     }
@@ -510,6 +555,7 @@ impl App {
             KeyCode::Char('s') => self.rescan(),
             KeyCode::Char('R') => self.open_runtimes(),
             KeyCode::Enter => self.launch_selected(),
+            KeyCode::Char('x') => self.stop_selected(),
             _ => self.on_game_action(key),
         }
     }
@@ -850,34 +896,37 @@ impl App {
 
     fn launch_selected(&mut self) {
         let Some(dir) = self.selected().map(str::to_string) else { return };
-        if self.running.contains_key(&dir) {
-            self.set_status(format!("{dir} is already running"), Level::Warn);
+        if self.is_running(&dir) {
+            self.set_status(
+                format!("{} is already running (x to stop it)", self.game_name(&dir)),
+                Level::Warn,
+            );
             return;
         }
         let Some(plan) = self.report(launch::plan(&self.lib, &self.lock, &dir, &[])) else { return };
-        let log = launch::log_path(&dir);
-        let Some(mut child) = self.report(plan.spawn_detached(&log)) else { return };
-        let started = match launch::record_start(&self.lib, &dir) {
-            Ok(t) => t,
-            Err(_) => crate::util::now(),
-        };
-        self.running.insert(dir.clone(), child.id());
-        self.reload();
-        let name = self.lock.games.get(&dir).map(|g| g.display_name(&dir).to_string()).unwrap_or_default();
-        self.set_status(
-            format!("Launched {name} with {} · log: {}", plan.runtime, crate::util::tilde(&log)),
-            Level::Ok,
+        let Some((_, log)) = self.report(session::spawn_detached(&self.lib, &dir, &[])) else { return };
+        self.launching.insert(dir.clone(), Instant::now());
+        let name = self.game_name(&dir);
+        match plan.environment_warning() {
+            Some(w) => self.set_status(format!("Launched {name}, but: {w}"), Level::Warn),
+            None => self.set_status(
+                format!("Launched {name} with {} · log: {}", plan.runtime, crate::util::tilde(&log)),
+                Level::Ok,
+            ),
+        }
+    }
+
+    fn stop_selected(&mut self) {
+        let Some(dir) = self.selected().map(str::to_string) else { return };
+        if !self.running.contains_key(&dir) {
+            self.set_status(format!("{} is not running", self.game_name(&dir)), Level::Warn);
+            return;
+        }
+        let message = format!(
+            "Stop {}?\nThis ends the game and its wine processes; unsaved progress is lost.",
+            self.game_name(&dir)
         );
-        let lib = self.lib.clone();
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            let status = match child.wait() {
-                Ok(s) => s.to_string(),
-                Err(e) => format!("wait failed: {e}"),
-            };
-            let secs = launch::record_end(&lib, &dir, started).unwrap_or(0);
-            let _ = tx.send(Msg::GameExited { dir, secs, status });
-        });
+        self.modal = Some(Modal::Confirm { kind: ConfirmKind::StopGame(dir), message });
     }
 
     // -- runtime screen ----------------------------------------------------
@@ -1066,6 +1115,16 @@ impl App {
                     self.set_status(format!("Removed {name}"), Level::Ok);
                 }
                 self.refresh_installed();
+            }
+            ConfirmKind::StopGame(dir) => {
+                self.set_status(format!("Stopping {}…", self.game_name(&dir)), Level::Info);
+                let lib = self.lib.clone();
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let result =
+                        session::stop(&lib, &dir, Duration::from_secs(5)).map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Msg::Stopped { dir, result });
+                });
             }
         }
     }

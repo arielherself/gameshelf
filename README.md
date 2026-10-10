@@ -31,8 +31,16 @@ Or try it directly: `nix run github:arielherself/gameshelf`.
 
 The package uses umu-launcher from
 [its official flake](https://github.com/Open-Wine-Components/umu-launcher#from-our-flake)
-and puts `umu-run` on gameshelf's `PATH`, so nothing else is needed. Outside
-Nix, `cargo install --path .` works too, with `umu-run` on your `PATH`.
+as a fallback: it is appended to gameshelf's `PATH`, so a `umu-run` installed
+by your distribution takes precedence. Outside Nix, `cargo install --path .`
+works too, with `umu-run` on your `PATH`.
+
+> **Not on NixOS?** Install umu-launcher with your distribution's package
+> manager (e.g. `pacman -S umu-launcher`). The Nix build runs games in an FHS
+> sandbox that only finds GPU drivers through `/run/opengl-driver`, which only
+> NixOS (or a setup like nix-system-graphics) provides. Without it Mesa
+> reports `driver missing` and the game never opens a window. `gameshelf info
+> <game>` shows which `umu-run` is used and warns about this case.
 
 ## Usage
 
@@ -40,7 +48,7 @@ Nix, `cargo install --path .` works too, with `umu-run` on your `PATH`.
 
 | Key | Action |
 | --- | --- |
-| `Enter` | launch the selected game |
+| `Enter` | launch the selected game · `x` stop it |
 | `/` | filter · `o` toggle sort (name / recently played) |
 | `m` | search Steam and pick the match |
 | `a` | set the Steam app id by hand (empty = none, `auto` = match again) |
@@ -57,6 +65,7 @@ gameshelf info sinking              # details; games match by dir, title, app id
 gameshelf run "Order of the Sinking Star" -- -windowed
 gameshelf run celeste --dry-run     # print the umu-run command instead
 gameshelf run celeste --detach      # return immediately, log to ~/.local/state/gameshelf/logs
+gameshelf stop celeste              # end a running (or hung) game and its wine processes
 
 gameshelf search paws shelter       # find an app id
 gameshelf set Paws --appid 434000   # set it by hand (`auto` to re-match, `none` to clear)
@@ -99,9 +108,15 @@ umu-run "<exe>" <args>
   snake_case, e.g. `OrderOfTheSinkingStar` → `order_of_the_sinking_star`), so
   prefixes made by hand keep working. Otherwise a new one is created on first
   launch.
-- Games started from the TUI are detached (they keep running after you quit)
-  and log to `~/.local/state/gameshelf/logs/<game>.log`. Playtime is recorded
-  when the game exits, as long as gameshelf is still running.
+- Every launch runs under a small gameshelf supervisor process. It registers
+  the session in `$XDG_RUNTIME_DIR/gameshelf/sessions`, records playtime when
+  the game exits, and cleans up. Running state is therefore the same in every
+  TUI or CLI invocation, and games started from the TUI keep running (and are
+  still tracked) after you quit it. Detached launches log to
+  `~/.local/state/gameshelf/logs/<game>.log`.
+- Stopping a game (`x` in the TUI, `gameshelf stop`) sends SIGTERM to
+  everything the launch started (umu-run, the Steam runtime container, wine
+  processes, the game), then SIGKILL to whatever is still alive 5 seconds later.
 
 ## Files
 

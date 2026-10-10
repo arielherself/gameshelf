@@ -1,9 +1,9 @@
 //! Building and running the `umu-run` command for a game.
 
 use std::fs;
-use std::os::unix::process::CommandExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -110,8 +110,8 @@ impl LaunchPlan {
     fn spawn_err(&self, e: std::io::Error) -> anyhow::Error {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow::anyhow!(
-                "`{}` not found — install umu-launcher (the Nix package bundles it) \
-                 or set GAMESHELF_UMU_RUN",
+                "`{}` not found — install umu-launcher, or set umu_run in gameshelf.lock \
+                 (or GAMESHELF_UMU_RUN)",
                 self.umu_run
             )
         } else {
@@ -126,19 +126,45 @@ impl LaunchPlan {
         Ok(child.wait()?)
     }
 
-    /// Start in its own process group with output going to `log`, so it
-    /// survives the TUI exiting and doesn't get terminal signals.
-    pub fn spawn_detached(&self, log: &Path) -> Result<Child> {
-        self.prepare()?;
-        if let Some(parent) = log.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let out = fs::File::create(log).with_context(|| format!("creating {}", log.display()))?;
-        let err = out.try_clone()?;
-        let mut cmd = self.command();
-        cmd.stdin(Stdio::null()).stdout(out).stderr(err).process_group(0);
-        cmd.spawn().map_err(|e| self.spawn_err(e))
+    /// The `umu-run` that will actually be executed.
+    pub fn umu_path(&self) -> Option<PathBuf> {
+        find_in_path(&self.umu_run)
     }
+
+    /// Known-bad setups worth telling the user about before they wonder why
+    /// the game shows no window.
+    pub fn environment_warning(&self) -> Option<String> {
+        nix_gpu_warning(&self.umu_path()?)
+    }
+}
+
+/// Resolve a command name like the shell would.
+pub fn find_in_path(cmd: &str) -> Option<PathBuf> {
+    if cmd.contains('/') {
+        let p = PathBuf::from(cmd);
+        return p.is_file().then_some(p);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(cmd))
+        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
+/// umu-launcher built by Nix runs games in an FHS sandbox whose graphics
+/// drivers come from `/run/opengl-driver`. Only NixOS (or a manual setup
+/// such as nix-system-graphics) provides that; elsewhere Mesa finds no
+/// driver and the game never opens a window.
+fn nix_gpu_warning(umu: &Path) -> Option<String> {
+    let real = fs::canonicalize(umu).unwrap_or_else(|_| umu.to_path_buf());
+    let from_nix = real.starts_with("/nix/store");
+    let has_drivers = Path::new("/run/opengl-driver").exists() || Path::new("/etc/NIXOS").exists();
+    (from_nix && !has_drivers).then(|| {
+        format!(
+            "{} is the Nix build of umu-launcher, which can't see this system's GPU drivers \
+             (no /run/opengl-driver; not NixOS). Install umu-launcher with the system package \
+             manager so gameshelf picks it up, or set umu_run in gameshelf.lock.",
+            umu.display()
+        )
+    })
 }
 
 pub fn log_path(dir: &str) -> PathBuf {
@@ -241,6 +267,21 @@ mod tests {
         lock.games.get_mut("Celeste").unwrap().executable = Some("nope.exe".into());
         assert!(plan(&lib, &lock, "Celeste", &[]).unwrap_err().to_string().contains("does not exist"));
         assert!(plan(&lib, &lock, "Other", &[]).is_err());
+    }
+
+    #[test]
+    fn resolves_commands_on_path() {
+        assert_eq!(find_in_path("/bin/sh"), Some(PathBuf::from("/bin/sh")));
+        assert!(find_in_path("sh").is_some());
+        assert_eq!(find_in_path("definitely-not-a-command-gameshelf"), None);
+    }
+
+    #[test]
+    fn warns_about_nix_umu_only_without_drivers() {
+        let fake = Path::new("/nix/store/xxx-umu-launcher/bin/umu-run");
+        let expected = !Path::new("/run/opengl-driver").exists() && !Path::new("/etc/NIXOS").exists();
+        assert_eq!(nix_gpu_warning(fake).is_some(), expected);
+        assert_eq!(nix_gpu_warning(Path::new("/usr/bin/umu-run")), None);
     }
 
     #[test]

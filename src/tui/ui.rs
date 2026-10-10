@@ -44,7 +44,7 @@ fn draw_games(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|dir| {
             let g = &app.lock.games[dir];
-            let (mark, style) = if app.running.contains_key(dir) {
+            let (mark, style) = if app.is_running(dir) {
                 ("▶ ", Style::new().green())
             } else if !app.lib.game_dir(dir).is_dir() {
                 ("✗ ", Style::new().red())
@@ -122,8 +122,15 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         (None, _) => Span::raw("no Steam match — m to search, a to set an app id").yellow(),
     };
     lines.push(Line::from(vec![Span::raw(format!("{dir} · ")).dark_gray(), appid]));
-    if app.running.contains_key(dir) {
-        lines.push(Line::from("▶ running").green().bold());
+    if let Some(s) = app.running.get(dir) {
+        lines.push(Line::from(vec![
+            Span::raw(format!("▶ running for {}", format_duration(now().saturating_sub(s.started))))
+                .green()
+                .bold(),
+            Span::raw("  x to stop").dark_gray(),
+        ]));
+    } else if app.launching.contains_key(dir) {
+        lines.push(Line::from("▶ starting…").green());
     }
     if !app.lib.game_dir(dir).is_dir() {
         lines.push(Line::from("✗ directory missing from the library").red());
@@ -388,6 +395,7 @@ fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
         (Some(Modal::Help), _) => &[("any key", "close")],
         (None, Screen::Games) => &[
             ("Enter", "play"),
+            ("x", "stop"),
             ("/", "filter"),
             ("m", "match"),
             ("a", "app id"),
@@ -481,6 +489,7 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal) {
             let rows: &[(&str, &str)] = &[
                 ("Games", ""),
                 ("Enter", "launch the selected game (detached; output goes to its log)"),
+                ("x", "stop the selected game (kills it and its wine processes)"),
                 ("j/k ↑/↓ g/G", "move"),
                 ("/", "filter by name · Esc clears"),
                 ("o", "sort by name / recently played"),

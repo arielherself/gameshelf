@@ -5,6 +5,7 @@ mod library;
 mod lockfile;
 mod names;
 mod runtime;
+mod session;
 mod steam;
 mod tui;
 mod util;

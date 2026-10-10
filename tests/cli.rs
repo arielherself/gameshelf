@@ -164,6 +164,7 @@ impl Env {
             .env("XDG_CONFIG_HOME", self.tmp.path().join("config"))
             .env("XDG_STATE_HOME", self.tmp.path().join("state"))
             .env("XDG_CACHE_HOME", self.tmp.path().join("cache"))
+            .env("XDG_RUNTIME_DIR", self.tmp.path().join("run"))
             .env_remove("GAMESHELF_OFFLINE")
             .env_remove("GAMESHELF_UMU_RUN")
             .env_remove("GITHUB_TOKEN")
@@ -503,4 +504,83 @@ fn concurrent_updates_do_not_lose_writes() {
     for i in 0..8 {
         assert_eq!(env.game(&format!("Game{i}"))["env"]["N"].as_str(), Some(i.to_string().as_str()));
     }
+}
+
+#[test]
+fn sessions_are_shared_between_processes_and_can_be_stopped() {
+    let env = Env::new();
+    env.add_game("Celeste", "Celeste.exe");
+    env.add_runtime("GE-Proton11-7-x86_64");
+    // A "game" that keeps running, with a child process like wineserver.
+    let umu = env.tmp.path().join("slow-umu");
+    fs::write(&umu, "#!/bin/sh\necho game output\nsleep 60 &\nsleep 60\n").unwrap();
+    fs::set_permissions(&umu, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |args: &[&str]| env.cmd(args).env("GAMESHELF_UMU_RUN", &umu).arg("--offline").output().unwrap();
+
+    let out = run(&["run", "celeste", "--detach"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("Started Celeste"), "{}", stderr(&out));
+
+    // Another process sees it running (the supervisor registers right away).
+    let mut listed = String::new();
+    for _ in 0..50 {
+        listed = String::from_utf8_lossy(&run(&["list"]).stdout).into_owned();
+        if listed.contains("▶ running") {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let log_path = env.tmp.path().join("state/gameshelf/logs/Celeste.log");
+    assert!(
+        listed.contains("Celeste  ▶ running"),
+        "{listed}\nlog: {}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
+    assert!(String::from_utf8_lossy(&run(&["info", "celeste"]).stdout).contains("running for"));
+    assert!(env.game("Celeste")["last_played"].as_integer().is_some());
+
+    // No second instance, detached or not.
+    let out = run(&["run", "celeste", "--detach"]);
+    assert!(!out.status.success() && stderr(&out).contains("already running"), "{}", stderr(&out));
+    let out = run(&["run", "celeste"]);
+    assert!(!out.status.success() && stderr(&out).contains("already running"), "{}", stderr(&out));
+
+    let out = run(&["stop", "celeste"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!String::from_utf8_lossy(&run(&["list"]).stdout).contains("running"));
+    let out = run(&["stop", "celeste"]);
+    assert!(!out.status.success() && stderr(&out).contains("not running"));
+
+    // The supervisor logged the session and recorded it.
+    let log = fs::read_to_string(env.tmp.path().join("state/gameshelf/logs/Celeste.log")).unwrap();
+    assert!(log.contains("gameshelf: launching Celeste"), "{log}");
+    assert!(log.contains("game output"), "{log}");
+    assert!(log.contains("gameshelf: Celeste exited"), "{log}");
+    // Nothing of the game is left behind.
+    for entry in fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(cwd) = fs::read_link(entry.path().join("cwd")) else { continue };
+        let cmd = fs::read_to_string(entry.path().join("cmdline")).unwrap_or_default().replace('\0', " ");
+        assert!(!cwd.starts_with(env.tmp.path()), "leftover process {:?}: {cmd}", entry.file_name());
+    }
+}
+
+#[test]
+fn stale_sessions_are_ignored() {
+    let env = Env::new();
+    env.add_game("Celeste", "Celeste.exe");
+    env.add_runtime("GE-Proton11-7-x86_64");
+    env.ok(&["--offline", "scan"]);
+    // A session file left by a supervisor that no longer exists.
+    let dir = env.tmp.path().join("run/gameshelf/sessions");
+    fs::create_dir_all(&dir).unwrap();
+    let lib = env.lib().canonicalize().unwrap();
+    let key = hex::encode(&sha2::Sha256::digest(lib.as_os_str().as_encoded_bytes())[..6]);
+    let file = dir.join(format!("{key}-Celeste-000000.json"));
+    fs::write(
+        &file,
+        format!(r#"{{"library":{:?},"dir":"Celeste","pid":999999999,"proc_start":1,"started":1}}"#, lib),
+    )
+    .unwrap();
+    assert!(!env.ok(&["--offline", "list"]).contains("running"));
+    assert!(!file.exists(), "stale session file is cleaned up");
 }

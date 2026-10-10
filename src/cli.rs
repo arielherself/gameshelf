@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -11,7 +12,7 @@ use crate::library::{self, Library, LookupOutcome};
 use crate::lockfile::{LockFile, MatchState};
 use crate::steam::SteamClient;
 use crate::util::{format_ago, format_bytes, format_duration, now, tilde};
-use crate::{config, launch, runtime, tui};
+use crate::{config, launch, runtime, session, tui};
 
 #[derive(Parser)]
 #[command(
@@ -59,6 +60,8 @@ pub enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Stop a running game (and its wine processes)
+    Stop { game: String },
     /// Register new directories and look them up on Steam
     Scan {
         /// Also retry games that previously found no Steam match
@@ -101,6 +104,13 @@ pub enum Cmd {
     /// Manage Proton runtimes
     #[command(subcommand, alias = "rt")]
     Runtime(RuntimeCmd),
+    /// Internal: run a game as its detached supervisor
+    #[command(hide = true)]
+    Supervise {
+        dir: String,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +142,11 @@ pub fn main() -> Result<i32> {
     let cli = Cli::parse();
     let (root, is_default) = config::library_path(cli.library.as_deref())?;
     let lib = Library::open(root, is_default)?;
+    // The supervisor only launches; scanning and lookups already happened.
+    if let Some(Cmd::Supervise { dir, args }) = &cli.command {
+        let status = session::run_supervised(&lib, dir, args)?;
+        return Ok(status.code().unwrap_or(1));
+    }
     let (_, report) = lib.scan()?;
 
     match cli.command.unwrap_or(Cmd::Tui) {
@@ -181,7 +196,7 @@ fn lookup_pending(lib: &Library, verbose: bool) {
 
 fn run_command(lib: &Library, offline: bool, cmd: Cmd) -> Result<i32> {
     match cmd {
-        Cmd::Tui => unreachable!(),
+        Cmd::Tui | Cmd::Supervise { .. } => unreachable!(),
         Cmd::List { json } => {
             let lock = lib.load()?;
             if json {
@@ -203,20 +218,23 @@ fn run_command(lib: &Library, offline: bool, cmd: Cmd) -> Result<i32> {
                 println!("{}", plan.shell_line());
                 return Ok(0);
             }
-            let name = lock.games[&dir].display_name(&dir).to_string();
-            eprintln!("Launching {name} with {}", plan.runtime);
             if detach {
-                let log = launch::log_path(&dir);
-                let child = plan.spawn_detached(&log)?;
-                launch::record_start(lib, &dir)?;
-                eprintln!("Started (pid {}), log: {}", child.id(), tilde(&log));
+                let name = lock.games[&dir].display_name(&dir).to_string();
+                if let Some(w) = plan.environment_warning() {
+                    eprintln!("warning: {w}");
+                }
+                let (pid, log) = session::spawn_detached(lib, &dir, &args)?;
+                eprintln!("Started {name} (supervisor pid {pid}), log: {}", tilde(&log));
                 return Ok(0);
             }
-            let started = launch::record_start(lib, &dir)?;
-            let status = plan.run_foreground()?;
-            let secs = launch::record_end(lib, &dir, started)?;
-            eprintln!("{name} exited ({status}) after {}", format_duration(secs));
+            let status = session::run_supervised(lib, &dir, &args)?;
             return Ok(status.code().unwrap_or(1));
+        }
+        Cmd::Stop { game } => {
+            let lock = lib.load()?;
+            let dir = library::resolve_game(&lock, &game)?;
+            session::stop(lib, &dir, Duration::from_secs(5))?;
+            println!("Stopped {}", lock.games[&dir].display_name(&dir));
         }
         Cmd::Scan { retry_unmatched } => {
             if retry_unmatched {
@@ -520,6 +538,7 @@ fn print_list(lib: &Library, lock: &LockFile) {
         println!("No games in {} — each directory there is treated as a game.", tilde(&lib.root));
         return;
     }
+    let running = session::active(lib);
     let mut rows: Vec<(String, String, String, String)> = lock
         .games
         .iter()
@@ -527,6 +546,9 @@ fn print_list(lib: &Library, lock: &LockFile) {
             let mut name = g.display_name(dir).to_string();
             if !lib.game_dir(dir).is_dir() {
                 name.push_str("  (missing)");
+            }
+            if running.contains_key(dir) {
+                name.push_str("  ▶ running");
             }
             let appid = match (g.appid, g.match_state) {
                 (Some(id), MatchState::Manual) => format!("{id}*"),
@@ -554,6 +576,12 @@ fn print_info(lib: &Library, lock: &LockFile, dir: &str) {
     println!("{}", g.display_name(dir));
     let field = |k: &str, v: &str| println!("  {k:<12} {v}");
     field("directory", &tilde(&lib.game_dir(dir)));
+    if let Some(s) = session::find(lib, dir) {
+        field(
+            "status",
+            &format!("running for {} (pid {})", format_duration(now().saturating_sub(s.started)), s.pid),
+        );
+    }
     let appid = match (g.appid, g.match_state) {
         (Some(id), MatchState::Manual) => format!("{id} (set manually)"),
         (Some(id), _) => format!("{id} (matched automatically)"),
@@ -588,6 +616,15 @@ fn print_info(lib: &Library, lock: &LockFile, dir: &str) {
         Err(e) => format!("error: {e:#}"),
     };
     field("runtime", &rt);
+    if let Ok(plan) = launch::plan(lib, lock, dir, &[]) {
+        match plan.umu_path() {
+            Some(p) => field("umu-run", &tilde(&p)),
+            None => field("umu-run", &format!("{} (not found on PATH)", plan.umu_run)),
+        }
+        if let Some(w) = plan.environment_warning() {
+            field("warning", &w);
+        }
+    }
     if !g.args.is_empty() {
         field("args", &shlex::try_join(g.args.iter().map(String::as_str)).unwrap_or_default());
     }
