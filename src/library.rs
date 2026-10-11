@@ -195,10 +195,6 @@ fn is_helper_exe(stem: &str) -> bool {
         "ndp",
         "oalinst",
         "physx",
-        "unitycrashhandler",
-        "crashreport",
-        "crashpad",
-        "crashhandler",
         "ue4prereq",
         "ueprereq",
         "easyanticheat",
@@ -215,7 +211,19 @@ fn is_helper_exe(stem: &str) -> bool {
         "7z",
         "winrar",
     ];
-    const CONTAINS: &[&str] = &["setup", "redist", "crash", "unins", "prereq", "uninstall"];
+    // Crash reporters are matched by their full names: plain "crash" would
+    // also hide games like Crash Bandicoot or Crashday.
+    const CONTAINS: &[&str] = &[
+        "setup",
+        "redist",
+        "unins",
+        "prereq",
+        "crashreport",
+        "crash_report",
+        "crashhandler",
+        "crashpad",
+        "crashsender",
+    ];
     PREFIXES.iter().any(|p| s.starts_with(p)) || CONTAINS.iter().any(|c| s.contains(c))
 }
 
@@ -482,6 +490,23 @@ mod tests {
             find_executables(&g, "PrisonEscapeSimulator"),
             vec!["Prison Escape Simulator Dig Out/Prison Escape Simulator.exe"]
         );
+    }
+
+    #[test]
+    fn crash_in_game_name_is_not_a_helper() {
+        for stem in ["CrashBandicoot", "CrashTeamRacing", "Crashday"] {
+            assert!(!is_helper_exe(stem), "{stem}");
+        }
+        for stem in [
+            "UnityCrashHandler64",
+            "CrashReportClient",
+            "UE4-CrashReporter",
+            "crash_reporter",
+            "crashpad_handler",
+            "CrashSender1403",
+        ] {
+            assert!(is_helper_exe(stem), "{stem}");
+        }
     }
 
     #[test]
