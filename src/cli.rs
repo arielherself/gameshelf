@@ -76,6 +76,9 @@ pub enum Cmd {
     /// Change a game's settings
     Set {
         game: String,
+        /// Name to show instead of the Steam title ("" to clear)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
         /// Steam app id; `auto` to search again, `none` for no app id
         #[arg(long, value_name = "ID|auto|none")]
         appid: Option<String>,
@@ -266,14 +269,14 @@ fn run_command(lib: &Library, offline: bool, cmd: Cmd) -> Result<i32> {
                 println!("{:>8}  {}", item.appid, item.name);
             }
         }
-        Cmd::Set { game, appid, exe, prefix, runtime, game_id, args, env, unset_env } => {
+        Cmd::Set { game, name, appid, exe, prefix, runtime, game_id, args, env, unset_env } => {
             let lock = lib.load()?;
             let dir = library::resolve_game(&lock, &game)?;
             set_game(
                 lib,
                 offline,
                 &dir,
-                SetArgs { appid, exe, prefix, runtime, game_id, args, env, unset_env },
+                SetArgs { name, appid, exe, prefix, runtime, game_id, args, env, unset_env },
             )?;
             print_info(lib, &lib.load()?, &dir);
         }
@@ -283,6 +286,7 @@ fn run_command(lib: &Library, offline: bool, cmd: Cmd) -> Result<i32> {
 }
 
 struct SetArgs {
+    name: Option<String>,
     appid: Option<String>,
     exe: Option<String>,
     prefix: Option<String>,
@@ -353,6 +357,10 @@ fn set_game(lib: &Library, offline: bool, dir: &str, a: SetArgs) -> Result<()> {
             None => None,
         };
         let g = lock.games.get_mut(dir).with_context(|| format!("unknown game {dir:?}"))?;
+        if let Some(name) = &a.name {
+            let name = name.trim();
+            g.name = (!name.is_empty()).then(|| name.to_string());
+        }
         if let Some(exe) = &a.exe {
             g.executable = if exe == "auto" {
                 library::find_executables(&game_dir, dir).into_iter().next()
@@ -589,6 +597,9 @@ fn print_info(lib: &Library, lock: &LockFile, dir: &str) {
         (None, _) => "none".into(),
     };
     field("steam app", &appid);
+    if g.display_name(dir) != g.default_name(dir) && g.steam.is_some() {
+        field("steam title", g.default_name(dir));
+    }
     if let Some(s) = &g.steam {
         if !s.developers.is_empty() {
             field("developer", &s.developers.join(", "));

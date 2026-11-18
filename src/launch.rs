@@ -176,22 +176,15 @@ pub fn log_path(dir: &str) -> PathBuf {
     base.join("gameshelf").join("logs").join(format!("{safe}.log"))
 }
 
-pub fn record_start(lib: &Library, dir: &str) -> Result<u64> {
-    let started = now();
-    lib.update(|lock| {
-        if let Some(g) = lock.games.get_mut(dir) {
-            g.last_played = Some(started);
-        }
-        Ok(())
-    })?;
-    Ok(started)
-}
-
-pub fn record_end(lib: &Library, dir: &str, started: u64) -> Result<u64> {
-    let secs = now().saturating_sub(started);
+/// Record a finished session: add its playtime, and mark the game as last
+/// played now, when it exited.
+pub fn record_session(lib: &Library, dir: &str, started: u64) -> Result<u64> {
+    let ended = now();
+    let secs = ended.saturating_sub(started);
     lib.update(|lock| {
         if let Some(g) = lock.games.get_mut(dir) {
             g.playtime_secs += secs;
+            g.last_played = Some(ended);
         }
         Ok(())
     })?;

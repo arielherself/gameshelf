@@ -3,9 +3,9 @@
 //! Every launch goes through a supervisor: either the foreground `gameshelf
 //! run`, or a detached `gameshelf supervise` process started by the TUI or
 //! `run --detach`. The supervisor registers the session in a small state file,
-//! runs umu-run, records playtime when it exits, and removes the file. Any
-//! gameshelf process can therefore tell which games are running, regardless of
-//! which process started them, and stop them.
+//! runs umu-run, records playtime and the exit time when it exits, and removes
+//! the file. Any gameshelf process can therefore tell which games are running,
+//! regardless of which process started them, and stop them.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -181,9 +181,8 @@ pub fn run_supervised(lib: &Library, dir: &str, extra_args: &[String]) -> Result
     }
     eprintln!("gameshelf: {}", plan.shell_line());
 
-    launch::record_start(lib, dir)?;
     let status = plan.run_foreground();
-    let secs = launch::record_end(lib, dir, started)?;
+    let secs = launch::record_session(lib, dir, started)?;
     let status = status?;
     eprintln!("gameshelf: {name} exited ({status}) after {}", format_duration(secs));
     Ok(status)

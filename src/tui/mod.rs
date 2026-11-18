@@ -97,6 +97,7 @@ pub struct SelectItem {
 #[derive(Clone)]
 pub enum InputKind {
     Filter,
+    Name(String),
     AppId(String),
     SearchQuery(String),
     Args(String),
@@ -679,6 +680,7 @@ impl App {
             } else {
                 items.push(item(&format!("Play {name}"), "Enter"));
             }
+            items.push(item("Rename…", "n"));
             items.push(item("Search Steam for a match…", "m"));
             items.push(item("Executable…", "e"));
             items.push(item("Wine prefix…", "p"));
@@ -773,6 +775,14 @@ impl App {
         let dir = dir.to_string();
         let game = game.clone();
         match key.code {
+            KeyCode::Char('n') => {
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::Name(dir.clone()),
+                    title: format!("Name for {dir}"),
+                    hint: "Empty = use the Steam title".into(),
+                    input: TextInput::new(game.display_name(&dir).to_string()),
+                })
+            }
             KeyCode::Char('a') => {
                 self.modal = Some(Modal::Input {
                     kind: InputKind::AppId(dir.clone()),
@@ -986,6 +996,13 @@ impl App {
     fn submit_input(&mut self, kind: InputKind, text: String) {
         match kind {
             InputKind::Filter => {}
+            InputKind::Name(dir) => {
+                self.update_game(&dir, |g| {
+                    g.name = (!text.is_empty() && text != g.default_name(&dir)).then(|| text.clone())
+                });
+                let shown = self.game_name(&dir);
+                self.set_status(format!("{dir}: shown as {shown}"), Level::Ok);
+            }
             InputKind::AppId(dir) => match text.as_str() {
                 "auto" => {
                     if let Some(()) = self.report(library::reset_match(&self.lib, &dir)) {

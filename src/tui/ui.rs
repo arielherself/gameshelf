@@ -943,6 +943,7 @@ fn draw_modal(f: &mut Frame, modal: &mut Modal, pad: Option<PadLayout>) -> Rect 
                 ("/", "filter by name · Esc clears"),
                 ("o", "sort by name / recently played"),
                 ("s", "rescan the library for new directories"),
+                ("n", "rename the game (empty = Steam title)"),
                 ("m", "search Steam and pick the matching game"),
                 ("a", "set the Steam app id by hand (empty = none, auto = re-match)"),
                 ("e", "choose the executable"),

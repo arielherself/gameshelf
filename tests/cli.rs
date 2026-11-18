@@ -314,6 +314,18 @@ fn manual_settings() {
     assert!(line.contains("-a 'b c'"), "{line}");
     assert!(line.contains(".proton-prefixes/shared"), "{line}");
 
+    // A custom name is shown everywhere and resolves the game.
+    env.ok(&["set", "iwanna", "--appid", "12345"]);
+    let out = env.ok(&["set", "iwanna", "--name", "  The Guy  "]);
+    assert!(out.starts_with("The Guy\n") && out.contains("I Wanna Be The Guy"), "{out}");
+    assert_eq!(env.game("iwanna")["name"].as_str(), Some("The Guy"));
+    assert!(env.ok(&["list"]).contains("The Guy"));
+    assert!(env.ok(&["info", "the guy"]).starts_with("The Guy\n"));
+    env.ok(&["set", "iwanna", "--name", ""]);
+    assert!(env.game("iwanna").get("name").is_none());
+    assert!(env.ok(&["info", "iwanna"]).starts_with("I Wanna Be The Guy\n"));
+    env.ok(&["set", "iwanna", "--appid", "none"]);
+
     // Invalid values are rejected and leave the entry alone.
     assert!(!env.run(&["set", "iwanna", "--runtime", "Nope"]).status.success());
     assert!(!env.run(&["set", "iwanna", "--exe", "missing.exe"]).status.success());
@@ -517,6 +529,7 @@ fn sessions_are_shared_between_processes_and_can_be_stopped() {
     fs::set_permissions(&umu, fs::Permissions::from_mode(0o755)).unwrap();
     let run = |args: &[&str]| env.cmd(args).env("GAMESHELF_UMU_RUN", &umu).arg("--offline").output().unwrap();
 
+    let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let out = run(&["run", "celeste", "--detach"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("Started Celeste"), "{}", stderr(&out));
@@ -537,7 +550,8 @@ fn sessions_are_shared_between_processes_and_can_be_stopped() {
         fs::read_to_string(&log_path).unwrap_or_default()
     );
     assert!(String::from_utf8_lossy(&run(&["info", "celeste"]).stdout).contains("running for"));
-    assert!(env.game("Celeste")["last_played"].as_integer().is_some());
+    // Last played is when the game exits, not when it starts.
+    assert!(env.game("Celeste").get("last_played").is_none());
 
     // No second instance, detached or not.
     let out = run(&["run", "celeste", "--detach"]);
@@ -556,6 +570,9 @@ fn sessions_are_shared_between_processes_and_can_be_stopped() {
     assert!(log.contains("gameshelf: launching Celeste"), "{log}");
     assert!(log.contains("game output"), "{log}");
     assert!(log.contains("gameshelf: Celeste exited"), "{log}");
+    let after_stop = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let last = env.game("Celeste")["last_played"].as_integer().unwrap() as u64;
+    assert!(last >= started && last <= after_stop, "{started} <= {last} <= {after_stop}");
     // Nothing of the game is left behind.
     for entry in fs::read_dir("/proc").unwrap().flatten() {
         let Ok(cwd) = fs::read_link(entry.path().join("cwd")) else { continue };

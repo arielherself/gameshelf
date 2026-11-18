@@ -58,6 +58,7 @@ works too, with `umu-run` on your `PATH`.
 | `Enter` | launch the selected game · `x` stop it |
 | `v` | switch between the library list and the cover shelf |
 | `/` | filter · `o` toggle sort (name / recently played) |
+| `n` | rename the game (empty = back to the Steam title) |
 | `m` | search Steam and pick the match |
 | `a` | set the Steam app id by hand (empty = none, `auto` = match again) |
 | `e` / `p` / `r` | choose executable / wine prefix / Proton runtime |
@@ -77,6 +78,7 @@ gameshelf stop celeste              # end a running (or hung) game and its wine 
 
 gameshelf search paws shelter       # find an app id
 gameshelf set Paws --appid 434000   # set it by hand (`auto` to re-match, `none` to clear)
+gameshelf set sinking --name "Sinking Star"   # show a name of your own ("" for the Steam title)
 gameshelf set celeste --exe bin/Celeste.exe --prefix shared --runtime GE-Proton11-7-x86_64
 gameshelf set celeste --args "-windowed -nointro" --env DXVK_HUD=fps
 gameshelf set celeste --args "" --unset-env DXVK_HUD
@@ -110,7 +112,7 @@ last. Pressing a key switches them back. Custom mappings in
 | X / □ | stop the game |
 | Y / △ | switch list / shelf |
 | LB RB / L1 R1 | page · switch pane on the runtimes screen |
-| ≡ (Menu / Options) | menu with everything else: match, executable, prefix, runtime, sort, rescan, runtimes, quit |
+| ≡ (Menu / Options) | menu with everything else: rename, match, executable, prefix, runtime, sort, rescan, runtimes, quit |
 | ⧉ (View / Create) | help |
 
 Buttons work by position, so on Nintendo controllers the bottom button (B)
@@ -164,8 +166,8 @@ umu-run "<exe>" <args>
   prefixes made by hand keep working. Otherwise a new one is created on first
   launch.
 - Every launch runs under a small gameshelf supervisor process. It registers
-  the session in `$XDG_RUNTIME_DIR/gameshelf/sessions`, records playtime when
-  the game exits, and cleans up. Running state is therefore the same in every
+  the session in `$XDG_RUNTIME_DIR/gameshelf/sessions`, records playtime and
+  the time it was last played when the game exits, and cleans up. Running state is therefore the same in every
   TUI or CLI invocation, and games started from the TUI keep running (and are
   still tracked) after you quit it. Detached launches log to
   `~/.local/state/gameshelf/logs/<game>.log`.
@@ -201,6 +203,7 @@ gameid_from_appid = true
 PROTON_PREFER_SDL = "1"
 
 [games.OrderOfTheSinkingStar]
+# name = "Sinking Star"    # shown instead of the Steam title
 match = "matched"          # pending | matched | unmatched | manual
 appid = 499170
 executable = "sinking_star.exe"

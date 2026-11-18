@@ -82,6 +82,9 @@ pub enum MatchState {
 pub struct Game {
     /// Unix timestamp of when the directory was first seen.
     pub added: u64,
+    /// Name chosen by the user; shown instead of the Steam title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(rename = "match")]
     pub match_state: MatchState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +104,7 @@ pub struct Game {
     pub args: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Unix time the game last exited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_played: Option<u64>,
     #[serde(skip_serializing_if = "is_zero")]
@@ -136,8 +140,17 @@ pub struct SteamInfo {
 }
 
 impl Game {
-    /// Name to show in lists: the Steam title when known, else the directory name.
+    /// Name to show in lists: the user's name for the game, else the Steam
+    /// title when known, else the directory name.
     pub fn display_name<'a>(&'a self, dir: &'a str) -> &'a str {
+        match self.name.as_deref().filter(|n| !n.trim().is_empty()) {
+            Some(n) => n,
+            None => self.default_name(dir),
+        }
+    }
+
+    /// The name shown without a custom one: the Steam title, else the directory.
+    pub fn default_name<'a>(&'a self, dir: &'a str) -> &'a str {
         match &self.steam {
             Some(s) if !s.name.is_empty() => &s.name,
             _ => dir,
@@ -195,6 +208,7 @@ mod tests {
             "Order Of The Sinking Star".into(),
             Game {
                 added: 42,
+                name: Some("Sinking Star".into()),
                 match_state: MatchState::Matched,
                 appid: Some(499170),
                 executable: Some("sinking_star.exe".into()),
@@ -242,5 +256,17 @@ mod tests {
         assert_eq!(g.match_state, MatchState::Manual);
         assert_eq!(g.appid, Some(504230));
         assert!(lock.settings.gameid_from_appid);
+    }
+
+    #[test]
+    fn display_name_prefers_custom_name() {
+        let mut g = Game::default();
+        assert_eq!(g.display_name("Dir"), "Dir");
+        g.steam = Some(SteamInfo { name: "Steam Title".into(), ..Default::default() });
+        assert_eq!(g.display_name("Dir"), "Steam Title");
+        g.name = Some("Mine".into());
+        assert_eq!(g.display_name("Dir"), "Mine");
+        g.name = Some("  ".into());
+        assert_eq!(g.display_name("Dir"), "Steam Title");
     }
 }
